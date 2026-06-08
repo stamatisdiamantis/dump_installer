@@ -15,16 +15,22 @@
 #include <stdio.h>
 
 bool mount_ufs_image(const char* file_path, char* out_mount_point) {
+    return mount_ufs_image_ex(file_path, out_mount_point, false);
+}
+
+bool mount_ufs_image_ex(const char* file_path, char* out_mount_point, bool skip_freshness_check) {
     struct stat st;
     if (stat(file_path, &st) != 0) {
         notify("stat failed: %s", strerror(errno));
         return false;
     }
 
-    time_t now = time(NULL);
-    if (difftime(now, st.st_mtime) < 12.0) {
-        notify("Image too new (%.0fs) - skipping", difftime(now, st.st_mtime));
-        return false;
+    if (!skip_freshness_check) {
+        time_t now = time(NULL);
+        if (difftime(now, st.st_mtime) < 12.0) {
+            notify("Image too new (%.0fs) - skipping", difftime(now, st.st_mtime));
+            return false;
+        }
     }
 
     const char* filename = strrchr(file_path, '/') ? strrchr(file_path, '/') + 1 : file_path;

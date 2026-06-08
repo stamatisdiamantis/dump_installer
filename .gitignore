@@ -1,0 +1,4 @@
+dump_installer.elf
+dump_installer.zip
+release/
+.di_stage_*/

@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <errno.h>
 #include <sys/stat.h>
 #include <dirent.h>
 #include <fcntl.h>
@@ -42,14 +43,26 @@ int copy_sce_sys_to_appmeta(const char* src, const char* title_id) {
     return 0;
 }
 
+static int copy_trophy_file(const char* src, const char* dst) {
+    if (access(src, F_OK) != 0)
+        return 0;
+    if (copy_file(src, dst) == 0)
+        return 0;
+    return -1;
+}
+
 int update_trophy(const char* title_id, const char* src_sce_sys) {
     char dst_base[MAX_PATH];
     char src[MAX_PATH];
     char dst[MAX_PATH];
+    int failures = 0;
 
     snprintf(dst_base, sizeof(dst_base), "/system_data/priv/appmeta/%s", title_id);
 
-    // Create only the needed subdirectories
+    mkdir("/system_data/priv/appmeta", 0755);
+    if (mkdir(dst_base, 0755) && errno != EEXIST)
+        failures++;
+
     char trophy2_dir[MAX_PATH];
     char uds_dir[MAX_PATH];
     snprintf(trophy2_dir, sizeof(trophy2_dir), "%s/trophy2", dst_base);
@@ -58,28 +71,22 @@ int update_trophy(const char* title_id, const char* src_sce_sys) {
     mkdir(trophy2_dir, 0755);
     mkdir(uds_dir, 0755);
 
-    // 1. trophy2/npbind.dat
     snprintf(src, sizeof(src), "%s/trophy2/npbind.dat", src_sce_sys);
     snprintf(dst, sizeof(dst), "%s/trophy2/npbind.dat", dst_base);
-    if (access(src, F_OK) == 0) {
-        copy_file(src, dst);
-    }
+    if (copy_trophy_file(src, dst) != 0)
+        failures++;
 
-    // 2. uds/npbind.dat
     snprintf(src, sizeof(src), "%s/uds/npbind.dat", src_sce_sys);
     snprintf(dst, sizeof(dst), "%s/uds/npbind.dat", dst_base);
-    if (access(src, F_OK) == 0) {
-        copy_file(src, dst);
-    }
+    if (copy_trophy_file(src, dst) != 0)
+        failures++;
 
-    // 3. param.json
     snprintf(src, sizeof(src), "%s/param.json", src_sce_sys);
     snprintf(dst, sizeof(dst), "%s/param.json", dst_base);
-    if (access(src, F_OK) == 0) {
-        copy_file(src, dst);
-    }
+    if (copy_trophy_file(src, dst) != 0)
+        failures++;
 
-    return 0;
+    return failures > 0 ? -1 : 0;
 }
 
 int update_snd0info(const char* title_id) {

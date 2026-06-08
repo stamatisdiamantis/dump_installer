@@ -25,12 +25,23 @@ endif
 
 ELF := dump_installer.elf
 
-CFLAGS := -Wall -Werror -lz -lSceSystemService -lSceUserService -lSceAppInstUtil -lSceFsInternalForVsh -lsqlite3
+SRCS := $(shell find src -name '*.c')
+
+CPPFLAGS += -Iinclude
+
+CFLAGS += -Wall -Werror
+
+LIBS := -lz \
+        -lSceSystemService \
+        -lSceUserService \
+        -lSceAppInstUtil \
+        -lSceFsInternalForVsh \
+        -lsqlite3
 
 all: $(ELF)
 
-$(ELF): $(wildcard *.c)
-	$(CC) $(CFLAGS) -o $@ $^
+$(ELF): $(SRCS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LIBS)
 	strip $@
 
 clean:

@@ -10,6 +10,7 @@ int sceFsInitUmountSaveDataOpt(UmountSaveDataOpt *opt);
 int sceFsUmountSaveData(UmountSaveDataOpt *opt, const char *mountPath, int handle, int ignoreErrors);
 
 bool mount_pfs_image(const char *file_path, char *out_mount_point);
+bool mount_pfs_save_data_to(const char *file_path, const char *mount_point);
 void unmount_pfs(const char *mount_point);
 
 #endif

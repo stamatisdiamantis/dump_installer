@@ -18,6 +18,8 @@
 
 #define PFSC_SCAN_MAX_DEPTH 3
 
+bool remount_pfsc_inner_pfs_from_outer_offset(pfsc_mount_result_t *result);
+
 static bool path_has_sce_sys(const char *mount_point) {
     char path[MAX_PATH];
     snprintf(path, sizeof(path), "%s/sce_sys/param.json", mount_point);
@@ -81,14 +83,8 @@ static bool try_mount_nested_candidate(const char *full_path, const char *name,
             unmount_ufs(inner_mount);
         }
     } else if (type == IMAGE_TYPE_PFS) {
-        if (mount_pfs_image(full_path, inner_mount) && path_has_sce_sys(inner_mount)) {
-            result->inner_is_save_pfs = true;
-            di_logf("PFSC inner PFS mounted via save-data at %s", inner_mount);
-            mounted = true;
-        } else if (inner_mount[0]) {
-            unmount_pfs(inner_mount);
-            inner_mount[0] = '\0';
-        }
+        bool nested_pfsc_inner = is_pfsc_mount_path(full_path);
+        char flat_pfs[MAX_PATH];
 
         if (!mounted && mount_lvd_pfs_image(full_path, IMAGE_TYPE_PFS, "/data/imgmnt/pfsmnt",
                                             inner_mount, &result->lvd_inner_unit) &&
@@ -96,9 +92,45 @@ static bool try_mount_nested_candidate(const char *full_path, const char *name,
             result->inner_is_lvd_pfs = true;
             di_logf("PFSC inner PFS mounted via nested LVD at %s", inner_mount);
             mounted = true;
-        } else if (!mounted && inner_mount[0]) {
+        } else if (inner_mount[0]) {
             unmount_lvd_pfs(inner_mount, result->lvd_inner_unit);
             result->lvd_inner_unit = -1;
+            inner_mount[0] = '\0';
+        }
+
+        if (!mounted && nested_pfsc_inner && result->outer_image_path[0]) {
+            mkdir("/data/imgmnt/pfscache", 0755);
+            snprintf(flat_pfs, sizeof(flat_pfs), "/data/imgmnt/pfscache/%08x_pfs_image.dat",
+                     fnv1a32(result->outer_image_path));
+            if (access(flat_pfs, F_OK) != 0)
+                link(full_path, flat_pfs);
+            if (access(flat_pfs, F_OK) == 0 &&
+                mount_pfs_image(flat_pfs, inner_mount) && path_has_sce_sys(inner_mount)) {
+                result->inner_is_save_pfs = true;
+                result->inner_is_lvd_pfs = false;
+                snprintf(result->inner_image_path, sizeof(result->inner_image_path), "%s",
+                         flat_pfs);
+                di_logf("PFSC inner PFS mounted via pfscache save-data at %s", inner_mount);
+                mounted = true;
+            } else {
+                if (inner_mount[0]) {
+                    unmount_pfs(inner_mount);
+                    inner_mount[0] = '\0';
+                }
+                if (access(flat_pfs, F_OK) == 0) {
+                    di_logf("removing invalid pfscache entry: %s", flat_pfs);
+                    unlink(flat_pfs);
+                }
+            }
+        }
+
+        if (!mounted && !nested_pfsc_inner &&
+            mount_pfs_image(full_path, inner_mount) && path_has_sce_sys(inner_mount)) {
+            result->inner_is_save_pfs = true;
+            di_logf("PFSC inner PFS mounted via save-data at %s", inner_mount);
+            mounted = true;
+        } else if (!mounted && inner_mount[0]) {
+            unmount_pfs(inner_mount);
             inner_mount[0] = '\0';
         }
     }
@@ -218,6 +250,78 @@ static bool try_save_data_candidate(pfsc_mount_result_t *result, const char *fil
     return false;
 }
 
+static void pfsc_invalidate_cache_file(const char *flat_pfs) {
+    if (flat_pfs && flat_pfs[0] && access(flat_pfs, F_OK) == 0) {
+        di_logf("removing invalid pfscache entry: %s", flat_pfs);
+        unlink(flat_pfs);
+    }
+}
+
+static bool try_save_data_pfscache(pfsc_mount_result_t *result, const char *flat_pfs,
+                                   char *try_mount, size_t try_sz) {
+    if (!try_save_data_candidate(result, flat_pfs, try_mount, try_sz)) {
+        pfsc_invalidate_cache_file(flat_pfs);
+        return false;
+    }
+    return true;
+}
+
+static bool pfsc_materialize_inner_cache(pfsc_mount_result_t *result, char *flat_pfs,
+                                         size_t flat_pfs_sz) {
+    if (!result || !flat_pfs || flat_pfs_sz == 0 || !result->outer_image_path[0])
+        return false;
+
+    mkdir("/data/imgmnt/pfscache", 0755);
+    snprintf(flat_pfs, flat_pfs_sz, "/data/imgmnt/pfscache/%08x_pfs_image.dat",
+             fnv1a32(result->outer_image_path));
+
+    if (access(flat_pfs, F_OK) == 0)
+        return true;
+
+    if (!result->inner_image_path[0] || access(result->inner_image_path, F_OK) != 0)
+        return false;
+
+    if (link(result->inner_image_path, flat_pfs) == 0) {
+        di_logf("hardlinked inner PFS for save-data: %s", flat_pfs);
+        return true;
+    }
+
+    di_logf("hardlink unavailable for save-data (%s -> %s): %s",
+            result->inner_image_path, flat_pfs, strerror(errno));
+    return false;
+}
+
+static bool pfsc_release_inner_lvd(pfsc_mount_result_t *result) {
+    if (!result || !result->inner_is_lvd_pfs || !result->inner_mount[0])
+        return false;
+
+    di_logf("releasing LVD inner mount to access %s", result->inner_image_path);
+    unmount_lvd_pfs(result->inner_mount, result->lvd_inner_unit);
+    result->inner_mount[0] = '\0';
+    result->lvd_inner_unit = -1;
+    return true;
+}
+
+static bool pfsc_restore_inner_lvd(pfsc_mount_result_t *result) {
+    char mount[MAX_PATH];
+    int unit = -1;
+
+    if (!result || result->inner_is_save_pfs || !result->inner_image_path[0])
+        return false;
+
+    if (mount_lvd_pfs_image(result->inner_image_path, IMAGE_TYPE_PFS, "/data/imgmnt/pfsmnt",
+                            mount, &unit) && path_has_sce_sys(mount)) {
+        snprintf(result->inner_mount, sizeof(result->inner_mount), "%s", mount);
+        result->lvd_inner_unit = unit;
+        result->inner_is_lvd_pfs = true;
+        di_logf("restored LVD inner PFS at %s", mount);
+        return true;
+    }
+
+    di_logf("failed to restore LVD inner PFS for %s", result->inner_image_path);
+    return false;
+}
+
 static void adopt_save_data_mount(pfsc_mount_result_t *result, const char *file_path,
                                   const char *try_mount) {
     char old_mount[MAX_PATH];
@@ -247,6 +351,7 @@ bool remount_pfsc_inner_pfs_via_save_data(pfsc_mount_result_t *result, const cha
     char local_pfs[MAX_PATH];
     bool is_ffpfsc = result && result->outer_image_path[0] &&
                      strstr(result->outer_image_path, ".ffpfsc");
+    bool released_lvd = false;
 
     if (!result || !result->inner_image_path[0])
         return false;
@@ -254,40 +359,76 @@ bool remount_pfsc_inner_pfs_via_save_data(pfsc_mount_result_t *result, const cha
         return true;
 
     if (is_ffpfsc) {
-        mkdir("/data/imgmnt/pfscache", 0755);
         snprintf(local_pfs, sizeof(local_pfs), "/data/imgmnt/pfscache/%08x_pfs_image.dat",
                  fnv1a32(result->outer_image_path));
-        if (access(local_pfs, F_OK) != 0) {
-            if (link(result->inner_image_path, local_pfs) == 0) {
-                di_logf("hardlinked inner PFS for save-data probe: %s", local_pfs);
-            } else {
-                di_logf("hardlink unavailable for save-data (%s -> %s): %s",
-                        result->inner_image_path, local_pfs, strerror(errno));
+
+        if (result->inner_is_lvd_pfs && result->inner_mount[0]) {
+            released_lvd = pfsc_release_inner_lvd(result);
+
+            if (result->inner_image_path[0] &&
+                access(result->inner_image_path, F_OK) == 0) {
+                di_logf("trying save-data on inner image: %s", result->inner_image_path);
+                if (try_save_data_candidate(result, result->inner_image_path, try_mount,
+                                            sizeof(try_mount))) {
+                    adopt_save_data_mount(result, result->inner_image_path, try_mount);
+                    di_logf("PFSC inner PFS switched to save-data inner at %s",
+                            result->inner_mount);
+                    return true;
+                }
             }
-        }
-        if (access(local_pfs, F_OK) == 0) {
-            di_logf("trying save-data on pfscache link: %s", local_pfs);
-            if (try_save_data_candidate(result, local_pfs, try_mount, sizeof(try_mount))) {
-                adopt_save_data_mount(result, local_pfs, try_mount);
-                di_logf("PFSC inner PFS switched to save-data at %s", result->inner_mount);
+
+            if (pfsc_materialize_inner_cache(result, local_pfs, sizeof(local_pfs))) {
+                di_logf("trying save-data on pfscache link: %s", local_pfs);
+                if (try_save_data_pfscache(result, local_pfs, try_mount, sizeof(try_mount))) {
+                    adopt_save_data_mount(result, local_pfs, try_mount);
+                    di_logf("PFSC inner PFS switched to save-data at %s", result->inner_mount);
+                    return true;
+                }
+            }
+
+            if (!result->inner_is_save_pfs && !result->inner_mount[0])
+                pfsc_restore_inner_lvd(result);
+        } else if (result->inner_image_path[0] &&
+                   access(result->inner_image_path, F_OK) == 0) {
+            di_logf("trying save-data on inner image: %s", result->inner_image_path);
+            if (try_save_data_candidate(result, result->inner_image_path, try_mount,
+                                        sizeof(try_mount))) {
+                adopt_save_data_mount(result, result->inner_image_path, try_mount);
+                di_logf("PFSC inner PFS switched to save-data inner at %s", result->inner_mount);
                 return true;
             }
         }
+
+        if (result->outer_image_path[0]) {
+            di_logf("trying save-data on outer .ffpfsc: %s", result->outer_image_path);
+            if (try_save_data_candidate(result, result->outer_image_path, try_mount,
+                                        sizeof(try_mount))) {
+                adopt_save_data_mount(result, result->outer_image_path, try_mount);
+                di_logf("PFSC inner PFS switched to save-data outer at %s", result->inner_mount);
+                return true;
+            }
+        }
+
+        if (released_lvd && !result->inner_is_save_pfs && !result->inner_mount[0])
+            pfsc_restore_inner_lvd(result);
     }
 
-    di_logf("probing save-data inner without dropping LVD: %s", result->inner_image_path);
-    if (try_save_data_candidate(result, result->inner_image_path, try_mount, sizeof(try_mount))) {
-        adopt_save_data_mount(result, result->inner_image_path, try_mount);
-        di_logf("PFSC inner PFS switched to save-data at %s", result->inner_mount);
-        return true;
-    }
-
-    if (result->outer_image_path[0] && !is_ffpfsc) {
-        di_logf("trying save-data on outer PFSC file: %s", result->outer_image_path);
-        if (try_save_data_candidate(result, result->outer_image_path, try_mount, sizeof(try_mount))) {
-            adopt_save_data_mount(result, result->outer_image_path, try_mount);
-            di_logf("PFSC inner PFS switched to save-data outer at %s", result->inner_mount);
+    if (!is_ffpfsc) {
+        di_logf("probing save-data inner without dropping LVD: %s", result->inner_image_path);
+        if (try_save_data_candidate(result, result->inner_image_path, try_mount, sizeof(try_mount))) {
+            adopt_save_data_mount(result, result->inner_image_path, try_mount);
+            di_logf("PFSC inner PFS switched to save-data at %s", result->inner_mount);
             return true;
+        }
+
+        if (result->outer_image_path[0]) {
+            di_logf("trying save-data on outer PFSC file: %s", result->outer_image_path);
+            if (try_save_data_candidate(result, result->outer_image_path, try_mount,
+                                        sizeof(try_mount))) {
+                adopt_save_data_mount(result, result->outer_image_path, try_mount);
+                di_logf("PFSC inner PFS switched to save-data outer at %s", result->inner_mount);
+                return true;
+            }
         }
     }
 
@@ -314,29 +455,30 @@ bool remount_pfsc_inner_pfs_from_outer_offset(pfsc_mount_result_t *result) {
     struct stat inner_st;
     uint64_t region_off = 0;
     char old_mount[MAX_PATH];
-    const char *outer_ext;
+    bool had_lvd = false;
 
-    if (!result || !result->outer_image_path[0] || !result->inner_image_path[0] ||
-        !result->inner_is_lvd_pfs || !result->inner_mount[0])
+    if (!result || !result->outer_image_path[0] || !result->inner_image_path[0])
         return false;
 
-    if (stat(result->inner_image_path, &inner_st) != 0 || inner_st.st_size <= 0)
-        return false;
+    if (result->inner_is_lvd_pfs && result->inner_mount[0]) {
+        snprintf(old_mount, sizeof(old_mount), "%s", result->inner_mount);
+        had_lvd = true;
+        pfsc_release_inner_lvd(result);
+    }
 
-    outer_ext = strrchr(result->outer_image_path, '.');
-    if (outer_ext && !strcasecmp(outer_ext, ".ffpfsc")) {
-        di_logf("offset remount skipped for compressed PFSC: %s", result->outer_image_path);
+    if (stat(result->inner_image_path, &inner_st) != 0 || inner_st.st_size <= 0) {
+        if (had_lvd)
+            pfsc_restore_inner_lvd(result);
+        di_logf("inner image stat failed for offset remount: %s", result->inner_image_path);
         return false;
     }
 
     if (!find_subfile_offset_in_container(result->outer_image_path, result->inner_image_path,
-                                          (uint64_t)inner_st.st_size, &region_off))
+                                          (uint64_t)inner_st.st_size, &region_off)) {
+        if (had_lvd)
+            pfsc_restore_inner_lvd(result);
         return false;
-
-    snprintf(old_mount, sizeof(old_mount), "%s", result->inner_mount);
-    unmount_lvd_pfs(old_mount, result->lvd_inner_unit);
-    result->lvd_inner_unit = -1;
-    result->inner_mount[0] = '\0';
+    }
 
     if (!mount_lvd_pfs_region(result->outer_image_path, region_off,
                               (uint64_t)inner_st.st_size, "/data/imgmnt/pfsmnt",
@@ -346,9 +488,13 @@ bool remount_pfsc_inner_pfs_from_outer_offset(pfsc_mount_result_t *result) {
             unmount_lvd_pfs(result->inner_mount, result->lvd_inner_unit);
         result->inner_mount[0] = '\0';
         result->lvd_inner_unit = -1;
+        if (had_lvd)
+            pfsc_restore_inner_lvd(result);
         return false;
     }
 
+    result->inner_is_lvd_pfs = true;
+    result->inner_is_save_pfs = false;
     di_logf("PFSC inner PFS remounted via outer offset %llu at %s",
             (unsigned long long)region_off, result->inner_mount);
     return true;

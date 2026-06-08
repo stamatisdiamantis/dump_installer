@@ -3,7 +3,12 @@
 
 #include "types.h"
 
+#include <stdbool.h>
+
 void notify(const char *fmt, ...);
+void browser_log(const char *fmt, ...);
+bool notify_game_installed(const char *title_id);
+bool notify_installer_toast(const char *message);
 int copy_file(const char *src, const char *dst);
 int copy_dir(const char *src, const char *dst);
 int remove_dir(const char *path);

@@ -65,10 +65,8 @@ bool mount_pfs_image(const char* file_path, char* out_mount_point) {
 
     //notify("Mounting PFS: %s → %s", file_path, out_mount_point);
 
-    if (!mount_pfs_save_data_to(file_path, out_mount_point)) {
-        notify("PFS mount failed");
+    if (!mount_pfs_save_data_to(file_path, out_mount_point))
         return false;
-    }
 
     return true;
 }

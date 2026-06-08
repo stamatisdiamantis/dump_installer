@@ -518,6 +518,32 @@ async function main() {
 
       {
 
+        text: 'Autoload — scan all storage',
+
+        onclick: async () => {
+
+          await ApiClient.launchApp(
+
+            `${window.workingDir}/dump_installer.elf`,
+
+            ['--autoload'],
+
+            null,
+
+            window.workingDir,
+
+            true,
+
+          );
+
+          return {};
+
+        },
+
+      },
+
+      {
+
         text: 'Remove grey icons (pick games folder)',
 
         onclick: async () => {

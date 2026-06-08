@@ -1,7 +1,7 @@
 #include "log.h"
 
-#include <stddef.h>
 #include <stdarg.h>
+#include <stddef.h>
 
 void di_log_open(void) {
 }

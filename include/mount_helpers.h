@@ -34,5 +34,12 @@ void recover_system_ex_overlay_mounts(void);
 
 void reset_installer_session_mounts(void);
 
+void reset_installer_session_mounts_excluding(const char *const *protected_paths,
+                                              int protected_count);
+
+void cleanup_all_imgmnt_staging(void);
+
+void cleanup_imgmnt_for_image(const char *image_path);
+
 #endif
 

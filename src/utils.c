@@ -15,15 +15,291 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <time.h>
 #include <sys/mman.h>
 #include <sys/mount.h>
+#include <sys/sysctl.h>
+
+#define SCE_NOTIFICATION_LOCAL_USER_ID_SYSTEM 0xFE
+#define GAME_INSTALLED_USE_CASE_ID "NUC240"
+#define INSTALLER_NOTIFY_ICON_DIR "/user/data/di_notify"
+#define INSTALLER_NOTIFY_ICON_FILE INSTALLER_NOTIFY_ICON_DIR "/icon0.png"
+#define INSTALLER_NOTIFY_SUBTITLE "Dump Installer"
+
+int sceNotificationSend(int user_id, bool is_logged_in, const char *payload);
+int sceNotificationSendById(int user_id, bool is_logged_in, const char *use_case_id,
+                            const char *params);
+
+static bool g_installer_notify_icon_ready = false;
+
+static void append_json_escaped(char *dst, size_t dst_size, const char *src) {
+    size_t used = strlen(dst);
+
+    if (!dst || dst_size == 0 || !src)
+        return;
+
+    for (; *src != '\0' && used + 1 < dst_size; ++src) {
+        const char *escape = NULL;
+        char single[2] = {0};
+
+        switch (*src) {
+        case '\\':
+            escape = "\\\\";
+            break;
+        case '"':
+            escape = "\\\"";
+            break;
+        case '\n':
+            escape = "\\n";
+            break;
+        case '\r':
+            escape = "\\r";
+            break;
+        case '\t':
+            escape = "\\t";
+            break;
+        default:
+            single[0] = *src;
+            escape = single;
+            break;
+        }
+
+        size_t escape_len = strlen(escape);
+        if (used + escape_len >= dst_size)
+            break;
+        memcpy(dst + used, escape, escape_len);
+        used += escape_len;
+        dst[used] = '\0';
+    }
+}
+
+static bool build_np_title_id(const char *title_id, char *out, size_t out_size) {
+    size_t len;
+
+    if (!title_id || !title_id[0] || !out || out_size < 4)
+        return false;
+
+    len = strlen(title_id);
+    if (len >= out_size)
+        return false;
+
+    if (strstr(title_id, "_")) {
+        snprintf(out, out_size, "%s", title_id);
+        return true;
+    }
+
+    if (len + 3 >= out_size)
+        return false;
+
+    snprintf(out, out_size, "%s_00", title_id);
+    return true;
+}
+
+bool notify_game_installed(const char *title_id) {
+    char np_title_id[64];
+    char escaped[128];
+    char params[256];
+
+    if (!build_np_title_id(title_id, np_title_id, sizeof(np_title_id)))
+        return false;
+
+    escaped[0] = '\0';
+    append_json_escaped(escaped, sizeof(escaped), np_title_id);
+
+    {
+        int n = snprintf(params, sizeof(params), "{\"npTitleId\":\"%s\"}", escaped);
+
+        if (n < 0 || (size_t)n >= sizeof(params))
+            return false;
+    }
+
+    return sceNotificationSendById(SCE_NOTIFICATION_LOCAL_USER_ID_SYSTEM, true,
+                                   GAME_INSTALLED_USE_CASE_ID, params) == 0;
+}
+
+static bool installer_icon_usable(const char *path) {
+    struct stat st;
+
+    return path && stat(path, &st) == 0 && st.st_size > 0;
+}
+
+static bool cache_installer_icon_from(const char *src) {
+    if (!installer_icon_usable(src))
+        return false;
+
+    mkdir("/user/data", 0777);
+    mkdir(INSTALLER_NOTIFY_ICON_DIR, 0777);
+    return copy_file(src, INSTALLER_NOTIFY_ICON_FILE) == 0 &&
+           installer_icon_usable(INSTALLER_NOTIFY_ICON_FILE);
+}
+
+static bool discover_installer_icon_source(char *out, size_t out_size) {
+    char exe_path[MAX_PATH];
+    char icon_path[MAX_PATH];
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1};
+    size_t exe_size = sizeof(exe_path);
+    static const char *fixed_sources[] = {
+        "/data/homebrew/dump_installer/sce_sys/icon0.png",
+        "/mnt/ext0/homebrew/dump_installer/sce_sys/icon0.png",
+        "/mnt/ext1/homebrew/dump_installer/sce_sys/icon0.png",
+        NULL
+    };
+
+    if (sysctl(mib, 4, exe_path, &exe_size, NULL, 0) == 0 && exe_path[0]) {
+        char *slash = strrchr(exe_path, '/');
+
+        if (slash) {
+            *slash = '\0';
+            snprintf(icon_path, sizeof(icon_path), "%s/sce_sys/icon0.png", exe_path);
+            if (installer_icon_usable(icon_path)) {
+                snprintf(out, out_size, "%s", icon_path);
+                return true;
+            }
+        }
+    }
+
+    for (int i = 0; fixed_sources[i]; i++) {
+        if (installer_icon_usable(fixed_sources[i])) {
+            snprintf(out, out_size, "%s", fixed_sources[i]);
+            return true;
+        }
+    }
+
+    for (int i = 0; i <= 7; i++) {
+        snprintf(icon_path, sizeof(icon_path),
+                 "/mnt/usb%d/homebrew/dump_installer/sce_sys/icon0.png", i);
+        if (installer_icon_usable(icon_path)) {
+            snprintf(out, out_size, "%s", icon_path);
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool ensure_installer_notify_icon(void) {
+    char source[MAX_PATH];
+
+    if (g_installer_notify_icon_ready)
+        return true;
+
+    if (installer_icon_usable(INSTALLER_NOTIFY_ICON_FILE)) {
+        g_installer_notify_icon_ready = true;
+        return true;
+    }
+
+    if (!discover_installer_icon_source(source, sizeof(source)))
+        return false;
+
+    if (!cache_installer_icon_from(source))
+        return false;
+
+    g_installer_notify_icon_ready = true;
+    return true;
+}
+
+static bool build_notification_timestamp(time_t timestamp, char out[32]) {
+    struct tm tm_utc;
+
+    if (!gmtime_r(&timestamp, &tm_utc))
+        return false;
+
+    return strftime(out, 32, "%Y-%m-%dT%H:%M:%S.000Z", &tm_utc) != 0;
+}
+
+static bool send_installer_rich_notification(const char *message) {
+    char escaped_message[512];
+    char escaped_subtitle[128];
+    char payload[4096];
+    char created_at[32];
+    char notification_id[32];
+    time_t now;
+    int len;
+
+    if (!message || !message[0])
+        return false;
+
+    if (!ensure_installer_notify_icon())
+        return false;
+
+    escaped_message[0] = '\0';
+    escaped_subtitle[0] = '\0';
+    append_json_escaped(escaped_message, sizeof(escaped_message), message);
+    append_json_escaped(escaped_subtitle, sizeof(escaped_subtitle),
+                        INSTALLER_NOTIFY_SUBTITLE);
+
+    now = time(NULL);
+    if (!build_notification_timestamp(now, created_at))
+        return false;
+
+    snprintf(notification_id, sizeof(notification_id), "%u",
+             (unsigned)((uint32_t)now ^ (uint32_t)getpid()));
+
+    len = snprintf(payload, sizeof(payload),
+                   "{\n"
+                   " \"rawData\": {\n"
+                   "  \"viewTemplateType\": \"InteractiveToastTemplateB\",\n"
+                   "  \"channelType\": \"ServiceFeedback\",\n"
+                   "  \"bundleName\": \"DumpInstallerDone\",\n"
+                   "  \"useCaseId\": \"IDC\",\n"
+                   "  \"soundEffect\": \"none\",\n"
+                   "  \"toastOverwriteType\": \"InQueue\",\n"
+                   "  \"isImmediate\": true,\n"
+                   "  \"priority\": 100,\n"
+                   "  \"viewData\": {\n"
+                   "   \"icon\": {\n"
+                   "    \"type\": \"Url\",\n"
+                   "    \"parameters\": {\n"
+                   "     \"url\": \"" INSTALLER_NOTIFY_ICON_FILE "\"\n"
+                   "    }\n"
+                   "   },\n"
+                   "   \"message\": {\n"
+                   "    \"body\": \"%s\"\n"
+                   "   },\n"
+                   "   \"subMessage\": {\n"
+                   "    \"body\": \"%s\"\n"
+                   "   }\n"
+                   "  }\n"
+                   " },\n"
+                   " \"createdDateTime\": \"%s\",\n"
+                   " \"localNotificationId\": \"%s\"\n"
+                   "}",
+                   escaped_message, escaped_subtitle, created_at, notification_id);
+    if (len < 0 || (size_t)len >= sizeof(payload))
+        return false;
+
+    return sceNotificationSend(SCE_NOTIFICATION_LOCAL_USER_ID_SYSTEM, true, payload) == 0;
+}
+
+bool notify_installer_toast(const char *message) {
+    if (!message || !message[0])
+        return false;
+
+    if (send_installer_rich_notification(message))
+        return true;
+
+    notify("%s", message);
+    return false;
+}
+
+void browser_log(const char *fmt, ...) {
+    va_list args;
+
+    va_start(args, fmt);
+    vprintf(fmt, args);
+    va_end(args);
+    fflush(stdout);
+}
 
 void notify(const char* fmt, ...) {
     notify_request_t req = {};
     va_list args;
+
     va_start(args, fmt);
     vsnprintf(req.message, sizeof(req.message) - 1, fmt, args);
     va_end(args);
+
+    di_logf("notify: %s", req.message);
     sceKernelSendNotificationRequest(0, &req, sizeof(req), 0);
 }
 
@@ -289,9 +565,16 @@ bool find_subfile_offset_in_container(const char *container_path, const char *in
     if (read_pfsc_inner_offset_cache(container_path, inner_size, offset_out))
         return true;
 
+    if (strstr(container_path, ".ffpfsc")) {
+        di_logf("offset scan skipped for .ffpfsc without cache: %s", container_path);
+        goto done;
+    }
+
     sig_len = inner_size < sizeof(sig) ? (size_t)inner_size : sizeof(sig);
     inner_fd = open(inner_path, O_RDONLY);
-    if (inner_fd < 0 || read(inner_fd, sig, sig_len) != (ssize_t)sig_len)
+    if (inner_fd < 0)
+        goto done;
+    if (read(inner_fd, sig, sig_len) != (ssize_t)sig_len)
         goto done;
 
     tail_len = 0;

@@ -9,27 +9,45 @@ Fork of [EchoStretch/dump_installer](https://github.com/EchoStretch/dump_install
 | Component | Version |
 |-----------|---------|
 | PS5 firmware | **10.6** |
-| Exploit | **Y2JB** |
+| Exploit | **Y2JB**, **BDJB** |
 | kstuff | **1.07 Test 2** |
-| Payload Manager | **v0.3.1** |
+| Payload Manager | **v0.3.0** |
 | Websrv / Homebrew Launcher | **v0.28.3** |
 
 Other firmware, exploits, or payload versions may work but are untested with this fork.
 
 ---
 
-### ✅ Installation & Launch
+### ✅ Release package — two ways to install
 
-1. **Copy your dump_installer folder** to:
-   - `/data/homebrew/`
-   - `/mnt/usb#/homebrew/` *(replace `#` with your USB number, e.g., `usb0`, `usb1`, etc.)*
-   - `/mnt/ext#/homebrew/` *(replace `#` with your EXT number, e.g., `ext0`, `ext1`, etc.)*
+**Option A — Payload only (`dump_installer.elf`)**
 
-2. **Install the Homebrew Launcher** and send the Websrv payload to your console:  
-   👉 [Websrv v0.28.3](https://github.com/ps5-payload-dev/websrv/releases/tag/v0.28.3)
+Copy the `.elf` to your payload folder (e.g. `/data/payloads/`). Use with **Payload Manager** or send manually after jailbreak. No Homebrew Launcher required.
 
-3. **Open the Homebrew Launcher.**  
-   Your Dump Installer should appear. **Navigate to the homebrew and run it.**
+**Option B — Homebrew Launcher (`dump_installer.zip`)**
+
+Unzip and copy the `dump_installer` folder to:
+
+- `/data/homebrew/dump_installer/`
+- `/mnt/usb#/homebrew/dump_installer/`
+- `/mnt/ext#/homebrew/dump_installer/`
+
+The folder contains `dump_installer.elf`, `homebrew.js`, and `sce_sys/icon0.png`.
+
+You also need **Websrv** and **Homebrew Launcher**:  
+👉 [Websrv v0.28.3](https://github.com/ps5-payload-dev/websrv/releases/tag/v0.28.3)
+
+---
+
+### 🚀 Three ways to run
+
+| How | What happens |
+|-----|----------------|
+| **1. Autoloaded (Payload Manager)** | Add `dump_installer.elf` to your **autoloader**. On each jailbreak it scans storage (`/data/homebrew`, USB, M.2, shadow mounts, etc.) and installs or remounts games automatically — no folder picker. |
+| **2. Manual payload** | Send or run `dump_installer.elf` from Payload Manager whenever you want (not in autoloader). Same auto-scan if launched as a payload; or point it at a specific folder if you launch it with a working directory set. |
+| **3. Homebrew Launcher** | Open Dump Installer from the launcher. Pick a folder, tap a **storage shortcut**, or use **Autoload — scan all storage** in Options. Full manual control over which folder to use. |
+
+Put your game dumps in a scanned folder (usually `/data/homebrew/`) either way.
 
 ---
 
@@ -103,14 +121,17 @@ The main **Select Game Directory** action opens the picker at `/data/homebrew` b
 
 ---
 
-### 🎮 Using the installer
+### 🎮 Using the installer (Homebrew Launcher)
 
 1. Open **Dump Installer** from Homebrew Launcher.
 2. Either:
    - Tap a **storage shortcut** in Options (if games were found), or
-   - Use the main action and pick the folder with your dumps.
+   - Use the main action and pick the folder with your dumps, or
+   - Use **Autoload — scan all storage** in Options.
 3. Wait for install to finish. Icons appear on the home screen / game library.
 4. Launch games from the library.
+
+If you use the **autoloader** or send the **payload manually**, steps 1–2 are skipped — scanning and install run on their own.
 
 **Mount-based installs:** Dumps stay as files (e.g. in `/data/homebrew/`). The installer mounts them at `/system_ex/app/TITLEID` for the session — this is **not** a full copy install like PSN.
 
@@ -127,6 +148,7 @@ The main **Select Game Directory** action opens the picker at `/data/homebrew` b
 | Option | Description |
 |--------|-------------|
 | **Storage shortcuts** | Install from a scanned path (shows game count) |
+| **Autoload — scan all storage** | Scan every known storage path and install/remount all games found |
 | **Remove grey icons** | Clears stuck library entries (no delete button in UI); pick the folder with your game dumps |
 | **Remove /data/dilocs folder only** | Removes legacy shortcut folder under `/data/dilocs/` (safe; does not delete games) |
 

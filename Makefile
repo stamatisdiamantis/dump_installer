@@ -35,6 +35,7 @@ LIBS := -lz \
         -lSceSystemService \
         -lSceUserService \
         -lSceAppInstUtil \
+        -lSceNotification \
         -lSceFsInternalForVsh \
         -lsqlite3
 

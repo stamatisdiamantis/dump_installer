@@ -11,9 +11,12 @@
 #include <unistd.h>
 
 #include "mount_helpers.h"
+#include "hash.h"
 #include "log.h"
 #include "utils.h"
 #include "types.h"
+
+int prepare_system_ex_mount_point(const char *title_id);
 
 int remount_system_ex(void) {
     struct iovec iov[] = {
@@ -217,63 +220,46 @@ int is_mounted(const char* path) {
     return strcmp(sfs.f_fstypename, "nullfs") == 0;
 }
 
-static int clear_system_ex_title_mount_layers(const char *path) {
-    for (int i = 0; i < 8; i++) {
-        struct statfs sfs;
-
-        if (!path_is_mount_point(path, &sfs))
-            return 0;
-
-        di_logf("prepare %s: unmounting %s", path, sfs.f_fstypename);
-        if (unmount(path, MNT_FORCE) != 0 && errno != ENOENT && errno != EINVAL)
-            return -1;
-    }
-
-    di_logf("prepare %s: mount layer limit reached", path);
-    return -1;
-}
-
 int prepare_system_ex_title_reinstall(const char *title_id) {
-    char path[MAX_PATH];
-
     if (!title_id || !*title_id)
         return -1;
 
-    snprintf(path, sizeof(path), "/system_ex/app/%s", title_id);
-    di_logf("reinstall prep for %s", path);
-
-    if (clear_system_ex_title_mount_layers(path) != 0)
-        return -1;
-
-    if (mkdir(path, 0755) != 0 && errno != EEXIST)
-        return -1;
-
-    return 0;
+    di_logf("reinstall prep for /system_ex/app/%s", title_id);
+    return prepare_system_ex_mount_point(title_id);
 }
 
 int prepare_system_ex_for_nullfs(const char *title_id) {
-    char path[MAX_PATH];
-
-    snprintf(path, sizeof(path), "/system_ex/app/%s", title_id);
-
-    if (clear_system_ex_title_mount_layers(path) != 0)
-        return -1;
-
-    if (is_mounted(path))
-        unmount(path, 0);
-
-    if (mkdir(path, 0755) != 0 && errno != EEXIST)
-        return -1;
-
-    di_logf("prepare %s for nullfs overlay", path);
-    return 0;
+    di_logf("prepare /system_ex/app/%s for nullfs overlay", title_id);
+    return prepare_system_ex_mount_point(title_id);
 }
 
-void reset_installer_session_mounts(void) {
+static bool mount_path_is_protected(const char *on, const char *const *protected_paths,
+                                    int protected_count) {
+    if (!on || !protected_paths || protected_count <= 0)
+        return false;
+
+    for (int i = 0; i < protected_count; i++) {
+        const char *prot = protected_paths[i];
+
+        if (!prot || !prot[0])
+            continue;
+        if (strcmp(on, prot) == 0)
+            return true;
+
+        size_t plen = strlen(prot);
+        if (strncmp(on, prot, plen) == 0 && on[plen] == '/')
+            return true;
+    }
+
+    return false;
+}
+
+void reset_installer_session_mounts_excluding(const char *const *protected_paths,
+                                              int protected_count) {
     struct statfs *mntbuf = NULL;
     int mntcount = getmntinfo(&mntbuf, MNT_NOWAIT);
 
-    di_logf("session mount reset start");
+    di_logf("session mount reset start (protect %d path(s))", protected_count);
     if (mntcount <= 0 || !mntbuf) {
         di_logf("session mount reset: no mount table");
         remount_system_ex();
@@ -298,6 +284,10 @@ void reset_installer_session_mounts(void) {
 
             if (!path_is_mount_point(on, NULL))
                 continue;
+            if (mount_path_is_protected(on, protected_paths, protected_count)) {
+                di_logf("session reset: keep protected %s", on);
+                continue;
+            }
 
             di_logf("session reset: unmount %s (%s)", on, mntbuf[i].f_fstypename);
             unmount(on, MNT_FORCE);
@@ -306,6 +296,110 @@ void reset_installer_session_mounts(void) {
 
     remount_system_ex();
     di_logf("session mount reset done");
+}
+
+void reset_installer_session_mounts(void) {
+    reset_installer_session_mounts_excluding(NULL, 0);
+}
+
+static bool imgmnt_path_matches_image_hash(const char *mount_path, const char *hash_suffix) {
+    const char *hit;
+
+    if (!mount_path || !hash_suffix || !hash_suffix[0])
+        return false;
+
+    hit = strstr(mount_path, hash_suffix);
+    if (!hit)
+        return false;
+
+    return hit[8] == '\0' || hit[8] == '/' || hit[8] == '_';
+}
+
+void cleanup_imgmnt_for_image(const char *image_path) {
+    char hash_suffix[16];
+    struct statfs *mntbuf = NULL;
+    int mntcount;
+
+    if (!image_path || !image_path[0])
+        return;
+
+    char pfscache_pfs[MAX_PATH];
+
+    snprintf(hash_suffix, sizeof(hash_suffix), "%08x", fnv1a32(image_path));
+    di_logf("imgmnt cleanup for %s (hash %s)", image_path, hash_suffix);
+
+    snprintf(pfscache_pfs, sizeof(pfscache_pfs), "/data/imgmnt/pfscache/%s_pfs_image.dat",
+             hash_suffix);
+    if (access(pfscache_pfs, F_OK) == 0) {
+        di_logf("imgmnt cleanup remove pfscache %s", pfscache_pfs);
+        unlink(pfscache_pfs);
+    }
+
+    for (int pass = 0; pass < 2; pass++) {
+        mntcount = getmntinfo(&mntbuf, MNT_NOWAIT);
+        if (mntcount <= 0 || !mntbuf)
+            break;
+
+        for (int i = 0; i < mntcount; i++) {
+            const char *on = mntbuf[i].f_mntonname;
+
+            if (pass == 0) {
+                if (strncmp(on, "/data/imgmnt/pfsmnt/", 20) != 0 &&
+                    strncmp(on, "/data/imgmnt/exfatmnt/", 22) != 0 &&
+                    strncmp(on, "/data/imgmnt/ufsmnt/", 21) != 0)
+                    continue;
+            } else if (strncmp(on, "/data/imgmnt/pfscmnt/", 21) != 0) {
+                continue;
+            }
+
+            if (!imgmnt_path_matches_image_hash(on, hash_suffix))
+                continue;
+            if (!path_is_mount_point(on, NULL))
+                continue;
+
+            di_logf("imgmnt cleanup unmount %s (%s)", on, mntbuf[i].f_fstypename);
+            unmount(on, MNT_FORCE);
+        }
+    }
+}
+
+void cleanup_all_imgmnt_staging(void) {
+    struct statfs *mntbuf = NULL;
+    int mntcount;
+
+    di_logf("imgmnt cleanup: all staging mounts");
+    for (int pass = 0; pass < 3; pass++) {
+        mntcount = getmntinfo(&mntbuf, MNT_NOWAIT);
+        if (mntcount <= 0 || !mntbuf)
+            break;
+
+        for (int i = 0; i < mntcount; i++) {
+            const char *on = mntbuf[i].f_mntonname;
+
+            if (strncmp(on, "/data/imgmnt/", 15) != 0)
+                continue;
+
+            if (pass == 0) {
+                if (strncmp(on, "/system_ex/", 11) == 0)
+                    continue;
+                if (strncmp(on, "/data/imgmnt/bridgemnt/", 23) != 0 &&
+                    strncmp(on, "/data/imgmnt/dipayload/", 23) != 0)
+                    continue;
+            } else if (pass == 1) {
+                if (strncmp(on, "/data/imgmnt/pfsmnt/", 20) != 0 &&
+                    strncmp(on, "/data/imgmnt/pfscmnt/", 21) != 0 &&
+                    strncmp(on, "/data/imgmnt/exfatmnt/", 22) != 0 &&
+                    strncmp(on, "/data/imgmnt/ufsmnt/", 21) != 0)
+                    continue;
+            }
+
+            if (!path_is_mount_point(on, NULL))
+                continue;
+
+            di_logf("imgmnt cleanup unmount %s (%s)", on, mntbuf[i].f_fstypename);
+            unmount(on, MNT_FORCE);
+        }
+    }
 }
 
 void recover_system_ex_overlay_mounts(void) {
